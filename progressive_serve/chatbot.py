@@ -20,7 +20,7 @@ import torch
 
 # [필수] Python path 설정 - 커스텀 모델 경로를 인식하게 합니다.
 sys.path.insert(0, "/workspace/vllm_test")
-sys.path.insert(0, "/acpl-ssd20/rinarina0429/7b_results/pruning/A")
+sys.path.insert(0, "/acpl-ssd20/1218/A")
 sys.path.insert(0, "/home/devewha/Juwon/vllm_test")
 
 # vLLM import
@@ -327,9 +327,9 @@ class ProgressiveChatbot:
 
 def main():
     # 설정 경로
-    model_path = "/acpl-ssd20/rinarina0429/7b_results/pruning/A"
-    stage2_path = "/acpl-ssd20/rinarina0429/7b_results/pruning/checkpoints/stage2_layers_B.safetensors"
-    stage3_path = "/acpl-ssd20/rinarina0429/7b_results/pruning/checkpoints/stage3_layers_C.safetensors"
+    model_path = "/acpl-ssd20/1218/A"
+    stage2_path = "/acpl-ssd20/1218/checkpoints/stage2_layers_B.safetensors"
+    stage3_path = "/acpl-ssd20/1218/checkpoints/stage3_layers_C.safetensors"
     
     # 챗봇 생성 및 실행
     chatbot = ProgressiveChatbot(
