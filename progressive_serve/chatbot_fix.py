@@ -1,25 +1,16 @@
 #!/usr/bin/env python3
 """
-Progressive Stage Chatbot with KV Cache Reset
+실행: python chatbot.py
+대화형 Progressive Stage 테스트 (Interactive Version)
 파일명: chatbot.py
 
-사용하는 파일들:
-1. progressive_llama_for_causal_lm_alpha_v0.py - 메인 모델 클래스
-2. progressive_llama_alpha_fixed.py (또는 progressive_llama_alpha_fixed2.py) - CUDA Graph 호환 모델
-3. alpha_gated_layer.py - Alpha Gating 레이어
-
-기능:
-- Stage 1/2/3 전환 지원
-- Stage 전환 시 KV Cache 초기화 후 맥락 재계산
-- 대화 히스토리 유지
-- Prefix caching 활용
-
-명령어:
-- quit: 종료
-- reset: KV cache 초기화 및 대화 히스토리 리셋
-- stage2: Stage 2로 전환 (KV cache 초기화 후 맥락 재계산)
-- stage3: Stage 3로 전환 (KV cache 초기화 후 맥락 재계산)
-- status: 현재 모델 상태 출력
+수정 사항:
+1. 모델 레지스트리 등록 추가 (vLLM 로딩 필수 단계)
+2. Python Path 설정 추가 (커스텀 모듈 참조용)
+3. Prefix Caching 활성화로 대화 맥락 유지
+4. Stage 전환 시 KV Cache 초기화
+5. 사용자 입력 기반 대화형 인터페이스
+6. 사용자 명령으로 Stage 전환 제어
 """
 
 import sys
@@ -27,26 +18,22 @@ import os
 import time
 import torch
 
-# Python path 설정 - 커스텀 모델 경로 인식
+# [필수] Python path 설정 - 커스텀 모델 경로를 인식하게 합니다.
 sys.path.insert(0, "/workspace/vllm_test")
-sys.path.insert(0, "/acpl-ssd20/1218/A")
+sys.path.insert(0, "/acpl-ssd30/merged_models/A_merged")
 sys.path.insert(0, "/home/devewha/Juwon/vllm_test")
 
 # vLLM import
 try:
     from vllm import LLM, SamplingParams
     from vllm.model_executor.models.registry import ModelRegistry
-    from progressive_serve.progressive_llama_for_causal_lm_alpha_v0 import ProgressiveLlamaForCausalLMAlpha
+    from progressive_llama_for_causal_lm_alpha_v0 import ProgressiveLlamaForCausalLMAlpha
     print("✅ vLLM and Custom Model imported successfully")
 except ImportError as e:
     print(f"❌ Failed to import required modules: {e}")
-    print("필요한 파일들:")
-    print("  - progressive_serve/progressive_llama_for_causal_lm_alpha_v0.py")
-    print("  - progressive_serve/progressive_llama_alpha_fixed.py")
-    print("  - progressive_serve/alpha_gated_layer.py")
     sys.exit(1)
 
-# 모델 레지스트리 등록
+# [필수] 모델 레지스트리 등록
 ModelRegistry.register_model(
     "ProgressiveLlamaForCausalLM",
     ProgressiveLlamaForCausalLMAlpha
@@ -54,434 +41,301 @@ ModelRegistry.register_model(
 
 
 class ProgressiveChatbot:
-    """
-    Progressive Stage를 지원하는 vLLM 챗봇
+    """대화형 Progressive Stage 챗봇"""
     
-    Stage 전환 시:
-    1. KV Cache 초기화 (sleep/wake_up)
-    2. 대화 맥락 재계산
-    """
-    
-    def __init__(
-        self,
-        model_path: str,
-        stage2_checkpoint: str,
-        stage3_checkpoint: str,
-        gpu_memory_utilization: float = 0.9,
-        enable_prefix_caching: bool = False,  # v0에서 multimodal 모델 미지원으로 비활성화
-        enforce_eager: bool = False,
-    ):
-        """
-        Args:
-            model_path: Stage 1 모델 경로
-            stage2_checkpoint: Stage 2 weights 경로
-            stage3_checkpoint: Stage 3 weights 경로
-            gpu_memory_utilization: GPU 메모리 사용률
-            enable_prefix_caching: Prefix caching 활성화
-            enforce_eager: CUDA Graph 비활성화 (True면 동적 레이어 변경 안정)
-        """
+    def __init__(self, model_path, stage2_path, stage3_path):
         self.model_path = model_path
-        self.stage2_checkpoint = stage2_checkpoint
-        self.stage3_checkpoint = stage3_checkpoint
+        self.stage2_path = stage2_path
+        self.stage3_path = stage3_path
+        self.current_stage = 1
+        self.conversation_history = ""
+        self.turn_count = 0
         
-        # vLLM 엔진 초기화
-        print("\n" + "="*60)
-        print("Initializing Progressive Chatbot...")
-        print("="*60 + "\n")
+        # 통계 정보
+        self.stage_stats = {
+            1: {"inference_times": [], "token_counts": []},
+            2: {"inference_times": [], "token_counts": []},
+            3: {"inference_times": [], "token_counts": []}
+        }
         
+        self.llm = None
+        self.model = None
+        self.sampling_params = None
+        
+    def initialize(self):
+        """vLLM 엔진 초기화"""
+        print("\n" + "="*80)
+        print("🚀 Progressive LLM Chatbot - Initialization")
+        print("="*80 + "\n")
+        
+        print("⏳ Initializing vLLM with Prefix Caching enabled...")
         start_init = time.time()
         
-        self.llm = LLM(
-            model=model_path,
-            trust_remote_code=True,
-            gpu_memory_utilization=gpu_memory_utilization,
-            enable_prefix_caching=enable_prefix_caching,
-            enforce_eager=enforce_eager,
-        )
+        try:
+            self.llm = LLM(
+                model=self.model_path,
+                trust_remote_code=True,
+                gpu_memory_utilization=0.9,
+                enforce_eager=False,
+                enable_prefix_caching=True  # Prefix caching 활성화!
+            )
+        except Exception as e:
+            print(f"❌ Failed to initialize vLLM: {e}")
+            import traceback
+            traceback.print_exc()
+            sys.exit(1)
         
         init_time = time.time() - start_init
-        print(f"✅ vLLM Initialization complete: {init_time:.2f}s\n")
+        print(f"✅ Initialization complete: {init_time:.2f}s\n")
         
-        # 모델 객체 접근
+        # 모델 객체 직접 접근
         try:
             self.model = self.llm.llm_engine.model_executor.driver_worker.model_runner.model
             print(f"✅ Model accessed: {type(self.model).__name__}")
         except Exception as e:
             print(f"❌ Failed to access model: {e}")
-            raise
+            sys.exit(1)
         
-        # 샘플링 파라미터
+        # Sampling 파라미터 설정
         self.sampling_params = SamplingParams(
+            max_tokens=100,
             temperature=0.7,
-            max_tokens=200,
+            top_p=0.95,
         )
         
-        # 대화 히스토리
-        self.history_prompt = ""
+        print(f"✅ Sampling parameters configured")
+        print(f"   - max_tokens: 100")
+        print(f"   - temperature: 0.7")
+        print(f"   - top_p: 0.95")
+        print(f"\n🎯 Currently in Stage {self.current_stage}\n")
         
-        # 현재 Stage
-        self.current_stage = 1
-        
-        print(f"✅ Chatbot ready at Stage {self.current_stage}")
-        print("-" * 60)
-    
-    def reset_kv_cache(self) -> float:
-        """
-        KV Cache 초기화
-        
-        여러 방법 시도:
-        1. sleep/wake_up (vLLM 0.6+ with enable_sleep_mode)
-        2. llm_engine 내부 scheduler 통한 초기화
-        3. prefix cache 리셋
-        4. 강제 가비지 컬렉션 (fallback)
-        
-        Returns:
-            초기화에 걸린 시간 (초)
-        """
-        print("🔄 Resetting KV cache...")
-        start = time.time()
-        
-        success = False
-        
-        # 방법 1: sleep/wake_up (enable_sleep_mode 필요)
-        try:
-            if hasattr(self.llm, 'sleep') and hasattr(self.llm, 'wake_up'):
-                # sleep mode가 활성화되어 있는지 확인
-                if (hasattr(self.llm, 'llm_engine') and 
-                    hasattr(self.llm.llm_engine, 'vllm_config') and
-                    hasattr(self.llm.llm_engine.vllm_config, 'model_config') and
-                    getattr(self.llm.llm_engine.vllm_config.model_config, 'enable_sleep_mode', False)):
-                    self.llm.sleep(level=1)
-                    self.llm.wake_up()
-                    success = True
-                    print("  ✅ Used sleep/wake_up method")
-        except Exception as e:
-            print(f"  ⚠️  sleep/wake_up failed: {e}")
-        
-        # 방법 2: Scheduler를 통한 KV cache 블록 해제
-        if not success:
-            try:
-                engine = self.llm.llm_engine
-                
-                # Scheduler의 block manager를 통한 초기화
-                if hasattr(engine, 'scheduler'):
-                    schedulers = engine.scheduler
-                    if not isinstance(schedulers, list):
-                        schedulers = [schedulers]
-                    
-                    for scheduler in schedulers:
-                        # 모든 sequence group 완료 처리
-                        if hasattr(scheduler, 'running'):
-                            scheduler.running.clear()
-                        if hasattr(scheduler, 'waiting'):
-                            scheduler.waiting.clear()
-                        if hasattr(scheduler, 'swapped'):
-                            scheduler.swapped.clear()
-                        
-                        # Block manager free
-                        if hasattr(scheduler, 'block_manager'):
-                            block_manager = scheduler.block_manager
-                            if hasattr(block_manager, 'reset'):
-                                block_manager.reset()
-                            elif hasattr(block_manager, '_reset'):
-                                block_manager._reset()
-                    
-                    success = True
-                    print("  ✅ Used scheduler reset method")
-            except Exception as e:
-                print(f"  ⚠️  Scheduler reset failed: {e}")
-        
-        # 방법 3: Prefix cache 리셋
-        if not success:
-            try:
-                if hasattr(self.llm.llm_engine, 'reset_prefix_cache'):
-                    self.llm.llm_engine.reset_prefix_cache()
-                    success = True
-                    print("  ✅ Used prefix cache reset method")
-            except Exception as e:
-                print(f"  ⚠️  Prefix cache reset failed: {e}")
-        
-        # 방법 4: 강제 가비지 컬렉션 (fallback)
-        if not success:
-            try:
-                import gc
-                gc.collect()
-                if torch.cuda.is_available():
-                    torch.cuda.empty_cache()
-                    torch.cuda.synchronize()
-                print("  ⚠️  Used fallback (gc + cuda cache clear)")
-                print("  ℹ️  Note: KV cache may not be fully cleared, but Stage transition is complete")
-                success = True
-            except Exception as e:
-                print(f"  ❌ Fallback also failed: {e}")
-        
-        elapsed = time.time() - start
-        if success:
-            print(f"✅ KV cache reset complete ({elapsed:.2f}s)")
-        else:
-            print(f"⚠️  KV cache reset may be incomplete ({elapsed:.2f}s)")
-        
-        return elapsed
-    
-    def recompute_context(self) -> float:
-        """
-        현재 대화 맥락을 새 Stage로 재계산
-        
-        Stage 전환 후 기존 히스토리로 새로운 KV cache 생성
-        
-        Returns:
-            재계산에 걸린 시간 (초)
-        """
-        if not self.history_prompt:
-            print("ℹ️  No history to recompute")
-            return 0.0
-        
-        print("🔄 Recomputing context with new stage...")
-        start = time.time()
-        
-        # 빈 생성 요청으로 KV cache만 생성
-        # max_tokens=1로 최소한의 생성만 수행
-        recompute_params = SamplingParams(
-            temperature=0.0,
-            max_tokens=1,  # 최소 토큰만 생성
-        )
-        
-        try:
-            # 기존 히스토리로 forward pass 수행 (KV cache 재구축)
-            _ = self.llm.generate([self.history_prompt], recompute_params)
-        except Exception as e:
-            print(f"⚠️  Context recompute warning: {e}")
-        
-        elapsed = time.time() - start
-        print(f"✅ Context recomputed ({elapsed:.2f}s)")
-        return elapsed
-    
-    def advance_to_stage2(self) -> bool:
-        """
-        Stage 2로 전환
-        
-        1. 새 레이어 weights 로드 및 활성화
-        2. KV Cache 초기화
-        3. 대화 맥락 재계산
-        
-        Returns:
-            성공 여부
-        """
-        if self.current_stage >= 2:
-            print(f"⚠️  Already at Stage {self.current_stage}")
+    def advance_stage(self, target_stage):
+        """Stage 전환 (KV Cache 초기화 포함)"""
+        if target_stage == self.current_stage:
+            print(f"⚠️  Already in Stage {target_stage}")
             return False
         
-        print("\n" + "="*60)
-        print("TRANSITIONING TO STAGE 2")
-        print("="*60 + "\n")
+        if target_stage < self.current_stage:
+            print(f"⚠️  Cannot downgrade from Stage {self.current_stage} to Stage {target_stage}")
+            return False
         
-        start = time.time()
+        if target_stage > 3:
+            print(f"⚠️  Invalid stage: {target_stage}. Valid stages: 1, 2, 3")
+            return False
         
+        print(f"\n{'='*80}")
+        print(f"🔄 Stage Transition: {self.current_stage} → {target_stage}")
+        print(f"{'='*80}\n")
+        
+        # 1. KV Cache 초기화
+        print("🧹 Clearing KV Cache...")
         try:
-            # 1. Stage 2 레이어 활성화
-            print("[Step 1/3] Activating Stage 2 layers...")
-            self.model.advance_to_stage2(layer_b_checkpoint=self.stage2_checkpoint)
-            
-            # 2. KV Cache 초기화
-            print("\n[Step 2/3] Resetting KV cache...")
-            self.reset_kv_cache()
-            
-            # 3. 대화 맥락 재계산
-            print("\n[Step 3/3] Recomputing conversation context...")
-            self.recompute_context()
-            
-            self.current_stage = 2
-            
-            total_time = time.time() - start
-            print(f"\n{'='*60}")
-            print(f"✅ NOW AT STAGE 2 (Total: {total_time:.2f}s)")
-            print(f"{'='*60}\n")
-            
-            return True
-            
+            self.llm.sleep(level=1)
+            print("✅ KV Cache cleared")
         except Exception as e:
-            print(f"❌ Stage 2 transition failed: {e}")
+            print(f"⚠️  Cache clear warning: {e}")
+        
+        # 2. Stage 전환
+        start_transition = time.time()
+        try:
+            if target_stage == 2:
+                print(f"📦 Loading Stage 2 layers from: {self.stage2_path}")
+                self.model.advance_to_stage2(layer_b_checkpoint=self.stage2_path)
+            elif target_stage == 3:
+                if self.current_stage == 1:
+                    print("⚠️  Must advance to Stage 2 first")
+                    return False
+                print(f"📦 Loading Stage 3 layers from: {self.stage3_path}")
+                self.model.advance_to_stage3(layer_c_checkpoint=self.stage3_path)
+            
+            transition_time = time.time() - start_transition
+            print(f"✅ Stage {target_stage} transition complete: {transition_time:.2f}s")
+        except Exception as e:
+            print(f"❌ Stage transition failed: {e}")
             import traceback
             traceback.print_exc()
             return False
-    
-    def advance_to_stage3(self) -> bool:
-        """
-        Stage 3로 전환
         
-        1. 새 레이어 weights 로드 및 활성화
-        2. KV Cache 초기화
-        3. 대화 맥락 재계산
-        
-        Returns:
-            성공 여부
-        """
-        if self.current_stage >= 3:
-            print(f"⚠️  Already at Stage {self.current_stage}")
-            return False
-        
-        if self.current_stage < 2:
-            print("⚠️  Must be at Stage 2 first. Advancing to Stage 2...")
-            if not self.advance_to_stage2():
-                return False
-        
-        print("\n" + "="*60)
-        print("TRANSITIONING TO STAGE 3")
-        print("="*60 + "\n")
-        
-        start = time.time()
-        
+        # 3. 엔진 재활성화
         try:
-            # 1. Stage 3 레이어 활성화
-            print("[Step 1/3] Activating Stage 3 layers...")
-            self.model.advance_to_stage3(layer_c_checkpoint=self.stage3_checkpoint)
-            
-            # 2. KV Cache 초기화
-            print("\n[Step 2/3] Resetting KV cache...")
-            self.reset_kv_cache()
-            
-            # 3. 대화 맥락 재계산
-            print("\n[Step 3/3] Recomputing conversation context...")
-            self.recompute_context()
-            
-            self.current_stage = 3
-            
-            total_time = time.time() - start
-            print(f"\n{'='*60}")
-            print(f"✅ NOW AT STAGE 3 - FULL MODEL (Total: {total_time:.2f}s)")
-            print(f"{'='*60}\n")
-            
-            return True
-            
+            self.llm.wake_up()
+            print("✅ Engine reactivated")
         except Exception as e:
-            print(f"❌ Stage 3 transition failed: {e}")
-            import traceback
-            traceback.print_exc()
-            return False
-    
-    def print_status(self):
-        """현재 모델 상태 출력"""
-        print("\n" + "="*60)
-        print(f"CHATBOT STATUS")
-        print("="*60)
-        print(f"Current Stage: {self.current_stage}")
-        print(f"History Length: {len(self.history_prompt)} chars")
+            print(f"⚠️  Wake up warning: {e}")
         
+        self.current_stage = target_stage
+        
+        # 4. 상태 확인
         try:
             self.model.print_status()
         except:
             try:
                 info = self.model.get_stage_info()
-                print(f"Active Layers: {info.get('active_layers', 'N/A')}")
-                print(f"Inactive Layers: {info.get('inactive_layers', 'N/A')}")
-                print(f"Progress: {info.get('activation_progress', 'N/A')}")
+                print(f"   Current stage: {info.get('stage')}")
             except:
-                print("⚠️  Detailed status not available")
+                pass
         
-        print("="*60 + "\n")
+        print(f"\n🎯 Now in Stage {self.current_stage}\n")
+        return True
     
-    def reset_conversation(self):
-        """대화 히스토리 초기화"""
-        print("🔄 Resetting conversation history...")
-        self.reset_kv_cache()
-        self.history_prompt = ""
-        print("✅ Conversation reset complete")
-    
-    def chat(self, user_input: str) -> tuple:
-        """
-        사용자 입력에 대한 응답 생성
+    def generate_response(self, user_input):
+        """사용자 입력에 대한 응답 생성"""
+        self.turn_count += 1
         
-        Args:
-            user_input: 사용자 메시지
+        # 대화 형식으로 프롬프트 구성
+        if self.conversation_history:
+            full_prompt = self.conversation_history + f"\nUser: {user_input}\nAssistant:"
+        else:
+            full_prompt = f"User: {user_input}\nAssistant:"
+        
+        # 추론 실행
+        print(f"\n💭 Thinking... (Stage {self.current_stage})")
+        start_time = time.time()
+        
+        try:
+            outputs = self.llm.generate([full_prompt], self.sampling_params)
+        except Exception as e:
+            print(f"❌ Generation failed: {e}")
+            return None
+        
+        elapsed_time = time.time() - start_time
+        
+        # 응답 추출
+        response = outputs[0].outputs[0].text.strip()
+        token_count = len(outputs[0].outputs[0].token_ids)
+        
+        # 통계 업데이트
+        self.stage_stats[self.current_stage]["inference_times"].append(elapsed_time)
+        self.stage_stats[self.current_stage]["token_counts"].append(token_count)
+        
+        # 대화 히스토리 업데이트
+        self.conversation_history = full_prompt + " " + response
+        
+        # 결과 출력
+        print(f"\n{'='*80}")
+        print(f"🤖 Assistant (Stage {self.current_stage} - Turn {self.turn_count})")
+        print(f"{'='*80}")
+        print(f"{response}")
+        print(f"{'-'*80}")
+        print(f"⏱️  Inference time: {elapsed_time:.4f}s")
+        print(f"🔢 Generated tokens: {token_count}")
+        print(f"📏 Context length: {len(full_prompt.split())} words")
+        print(f"{'='*80}\n")
+        
+        return response
+    
+    def print_statistics(self):
+        """대화 통계 출력"""
+        print(f"\n{'='*80}")
+        print("📊 Session Statistics")
+        print(f"{'='*80}")
+        print(f"Total turns: {self.turn_count}")
+        print(f"Final stage: {self.current_stage}")
+        print(f"Context length: {len(self.conversation_history.split())} words\n")
+        
+        for stage in [1, 2, 3]:
+            times = self.stage_stats[stage]["inference_times"]
+            tokens = self.stage_stats[stage]["token_counts"]
             
-        Returns:
-            AI 응답
-        """
-        # Llama 2 프롬프트 형식 적용
-        current_prompt = self.history_prompt + f"[INST] {user_input} [/INST]"
+            if times:
+                avg_time = sum(times) / len(times)
+                avg_tokens = sum(tokens) / len(tokens)
+                print(f"Stage {stage}:")
+                print(f"  - Turns: {len(times)}")
+                print(f"  - Avg inference time: {avg_time:.4f}s")
+                print(f"  - Avg tokens generated: {avg_tokens:.1f}")
+                print(f"  - Total time: {sum(times):.4f}s")
         
-        # 생성
-        start = time.time()
-        outputs = self.llm.generate([current_prompt], self.sampling_params)
-        elapsed = time.time() - start
-        
-        # 결과 추출
-        response = outputs[0].outputs[0].text
-        
-        # 히스토리 업데이트
-        self.history_prompt = current_prompt + f" {response} "
-        
-        return response, elapsed
+        print(f"{'='*80}\n")
+    
+    def print_help(self):
+        """도움말 출력"""
+        print(f"\n{'='*80}")
+        print("📖 Available Commands")
+        print(f"{'='*80}")
+        print("/stage2    - Advance to Stage 2 (load B layers)")
+        print("/stage3    - Advance to Stage 3 (load C layers)")
+        print("/stats     - Show session statistics")
+        print("/clear     - Clear conversation history")
+        print("/help      - Show this help message")
+        print("/exit      - Exit the chatbot")
+        print("\nOr just type your message to chat!")
+        print(f"{'='*80}\n")
+    
+    def clear_history(self):
+        """대화 히스토리 초기화"""
+        self.conversation_history = ""
+        print("✅ Conversation history cleared\n")
     
     def run(self):
-        """챗봇 메인 루프"""
-        print("\n" + "="*60)
-        print("Progressive vLLM Chatbot")
-        print("="*60)
-        print(f"Current Stage: {self.current_stage}")
-        print("\nCommands:")
-        print("  quit   - Exit chatbot")
-        print("  reset  - Reset KV cache and conversation")
-        print("  stage2 - Advance to Stage 2")
-        print("  stage3 - Advance to Stage 3")
-        print("  status - Show model status")
-        print("-" * 60)
+        """대화형 루프 실행"""
+        self.initialize()
+        self.print_help()
+        
+        print("💬 Chat started! Type your message or use commands.\n")
         
         while True:
             try:
-                user_input = input(f"\n[Stage {self.current_stage}] User: ").strip()
-            except (EOFError, KeyboardInterrupt):
-                print("\n\nGoodbye!")
+                # 사용자 입력 받기
+                user_input = input(f"[Stage {self.current_stage}] You: ").strip()
+                
+                if not user_input:
+                    continue
+                
+                # 명령어 처리
+                if user_input.startswith("/"):
+                    command = user_input.lower()
+                    
+                    if command == "/exit" or command == "/quit":
+                        print("\n👋 Goodbye!")
+                        self.print_statistics()
+                        break
+                    
+                    elif command == "/stage2":
+                        self.advance_stage(2)
+                    
+                    elif command == "/stage3":
+                        self.advance_stage(3)
+                    
+                    elif command == "/stats":
+                        self.print_statistics()
+                    
+                    elif command == "/clear":
+                        self.clear_history()
+                    
+                    elif command == "/help":
+                        self.print_help()
+                    
+                    else:
+                        print(f"⚠️  Unknown command: {user_input}")
+                        print("Type /help to see available commands\n")
+                
+                # 일반 대화 처리
+                else:
+                    self.generate_response(user_input)
+            
+            except KeyboardInterrupt:
+                print("\n\n⚠️  Interrupted by user")
+                self.print_statistics()
                 break
             
-            if not user_input:
-                continue
-            
-            # 명령어 처리
-            command = user_input.lower()
-            
-            if command == "quit":
-                print("Goodbye!")
-                break
-            
-            elif command == "reset":
-                self.reset_conversation()
-                continue
-            
-            elif command == "stage2":
-                self.advance_to_stage2()
-                continue
-            
-            elif command == "stage3":
-                self.advance_to_stage3()
-                continue
-            
-            elif command == "status":
-                self.print_status()
-                continue
-            
-            # 일반 대화
-            response, elapsed = self.chat(user_input)
-            
-            print(f"Bot: {response}")
-            print(f"⏱️  Generation time: {elapsed:.2f}s | Stage: {self.current_stage}")
+            except Exception as e:
+                print(f"❌ Error: {e}")
+                import traceback
+                traceback.print_exc()
 
 
 def main():
-    """메인 함수"""
-    # 설정 경로 (환경에 맞게 수정)
-    model_path = "/acpl-ssd20/1218/A"
-    stage2_checkpoint = "/acpl-ssd20/1218/checkpoints/stage2_layers_B.safetensors"
-    stage3_checkpoint = "/acpl-ssd20/1218/checkpoints/stage3_layers_C.safetensors"
+    # 설정 경로
+    model_path = "/acpl-ssd30/merged_models/A_merged"
+    stage2_path = "/acpl-ssd30/merged_models/stage2_layers_B.safetensors"
+    stage3_path = "/acpl-ssd30/merged_models/stage3_layers_C.safetensors"
     
     # 챗봇 생성 및 실행
     chatbot = ProgressiveChatbot(
         model_path=model_path,
-        stage2_checkpoint=stage2_checkpoint,
-        stage3_checkpoint=stage3_checkpoint,
-        gpu_memory_utilization=0.9,
-        enable_prefix_caching=False,  # v0에서 multimodal 모델 미지원으로 비활성화
-        enforce_eager=False,  # CUDA Graph 사용 (문제 시 True로 변경)
+        stage2_path=stage2_path,
+        stage3_path=stage3_path
     )
     
     chatbot.run()
