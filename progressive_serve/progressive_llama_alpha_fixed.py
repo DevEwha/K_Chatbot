@@ -30,7 +30,7 @@ except ImportError:
 from safetensors.torch import load_file
 import os
 
-from .alpha_gated_layer import AlphaGatedLayer
+from alpha_gated_layer import AlphaGatedLayer
 
 
 class ProgressiveLlamaModelAlpha(nn.Module):
