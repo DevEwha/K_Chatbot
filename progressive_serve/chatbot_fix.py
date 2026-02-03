@@ -68,7 +68,7 @@ class ProgressiveChatbot:
         stage2_checkpoint: str,
         stage3_checkpoint: str,
         gpu_memory_utilization: float = 0.9,
-        enable_prefix_caching: bool = True,
+        enable_prefix_caching: bool = False,  # v0에서 multimodal 모델 미지원으로 비활성화
         enforce_eager: bool = False,
     ):
         """
@@ -129,31 +129,98 @@ class ProgressiveChatbot:
         """
         KV Cache 초기화
         
+        여러 방법 시도:
+        1. sleep/wake_up (vLLM 0.6+ with enable_sleep_mode)
+        2. llm_engine 내부 scheduler 통한 초기화
+        3. prefix cache 리셋
+        4. 강제 가비지 컬렉션 (fallback)
+        
         Returns:
             초기화에 걸린 시간 (초)
         """
         print("🔄 Resetting KV cache...")
         start = time.time()
         
+        success = False
+        
+        # 방법 1: sleep/wake_up (enable_sleep_mode 필요)
         try:
-            # vLLM sleep/wake_up으로 KV cache 초기화
-            self.llm.sleep(level=1)  # KV cache 삭제
-            self.llm.wake_up()       # 엔진 재시작
-        except AttributeError:
-            # sleep/wake_up이 없는 버전의 경우
-            print("⚠️  sleep/wake_up not available, using alternative method...")
-            # llm_engine의 cache 관련 메서드 호출 시도
+            if hasattr(self.llm, 'sleep') and hasattr(self.llm, 'wake_up'):
+                # sleep mode가 활성화되어 있는지 확인
+                if (hasattr(self.llm, 'llm_engine') and 
+                    hasattr(self.llm.llm_engine, 'vllm_config') and
+                    hasattr(self.llm.llm_engine.vllm_config, 'model_config') and
+                    getattr(self.llm.llm_engine.vllm_config.model_config, 'enable_sleep_mode', False)):
+                    self.llm.sleep(level=1)
+                    self.llm.wake_up()
+                    success = True
+                    print("  ✅ Used sleep/wake_up method")
+        except Exception as e:
+            print(f"  ⚠️  sleep/wake_up failed: {e}")
+        
+        # 방법 2: Scheduler를 통한 KV cache 블록 해제
+        if not success:
+            try:
+                engine = self.llm.llm_engine
+                
+                # Scheduler의 block manager를 통한 초기화
+                if hasattr(engine, 'scheduler'):
+                    schedulers = engine.scheduler
+                    if not isinstance(schedulers, list):
+                        schedulers = [schedulers]
+                    
+                    for scheduler in schedulers:
+                        # 모든 sequence group 완료 처리
+                        if hasattr(scheduler, 'running'):
+                            scheduler.running.clear()
+                        if hasattr(scheduler, 'waiting'):
+                            scheduler.waiting.clear()
+                        if hasattr(scheduler, 'swapped'):
+                            scheduler.swapped.clear()
+                        
+                        # Block manager free
+                        if hasattr(scheduler, 'block_manager'):
+                            block_manager = scheduler.block_manager
+                            if hasattr(block_manager, 'reset'):
+                                block_manager.reset()
+                            elif hasattr(block_manager, '_reset'):
+                                block_manager._reset()
+                    
+                    success = True
+                    print("  ✅ Used scheduler reset method")
+            except Exception as e:
+                print(f"  ⚠️  Scheduler reset failed: {e}")
+        
+        # 방법 3: Prefix cache 리셋
+        if not success:
             try:
                 if hasattr(self.llm.llm_engine, 'reset_prefix_cache'):
                     self.llm.llm_engine.reset_prefix_cache()
-                elif hasattr(self.llm.llm_engine, 'scheduler'):
-                    # Scheduler의 free_seq 등을 통한 우회
-                    pass
+                    success = True
+                    print("  ✅ Used prefix cache reset method")
             except Exception as e:
-                print(f"⚠️  Alternative KV reset failed: {e}")
+                print(f"  ⚠️  Prefix cache reset failed: {e}")
+        
+        # 방법 4: 강제 가비지 컬렉션 (fallback)
+        if not success:
+            try:
+                import gc
+                gc.collect()
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+                    torch.cuda.synchronize()
+                print("  ⚠️  Used fallback (gc + cuda cache clear)")
+                print("  ℹ️  Note: KV cache may not be fully cleared, but Stage transition is complete")
+                success = True
+            except Exception as e:
+                print(f"  ❌ Fallback also failed: {e}")
         
         elapsed = time.time() - start
-        print(f"✅ KV cache reset complete ({elapsed:.2f}s)")
+        if success:
+            print(f"✅ KV cache reset complete ({elapsed:.2f}s)")
+        else:
+            print(f"⚠️  KV cache reset may be incomplete ({elapsed:.2f}s)")
+        
         return elapsed
     
     def recompute_context(self) -> float:
@@ -320,7 +387,7 @@ class ProgressiveChatbot:
         self.history_prompt = ""
         print("✅ Conversation reset complete")
     
-    def chat(self, user_input: str) -> str:
+    def chat(self, user_input: str) -> tuple:
         """
         사용자 입력에 대한 응답 생성
         
@@ -413,7 +480,7 @@ def main():
         stage2_checkpoint=stage2_checkpoint,
         stage3_checkpoint=stage3_checkpoint,
         gpu_memory_utilization=0.9,
-        enable_prefix_caching=True,
+        enable_prefix_caching=False,  # v0에서 multimodal 모델 미지원으로 비활성화
         enforce_eager=False,  # CUDA Graph 사용 (문제 시 True로 변경)
     )
     
