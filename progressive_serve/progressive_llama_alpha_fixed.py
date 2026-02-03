@@ -1,16 +1,9 @@
 """
 ProgressiveLlamaModel with Alpha Gating (vLLM v0 Engine) - CUDA Graph 호환 버전
-progressive_llama_alpha_fixed2.py
-
-기존 progressive_llama_alpha.py와의 차이:
-- activate_layers() 메서드만 수정
-- 나머지는 동일
 
 1. load_state_dict() → .copy_()로 변경 (메모리 주소 유지)
 2. fused_weights를 실제로 사용하도록 수정
 3. CUDA Graph 재캡처 불필요
-
-
 """
 
 from typing import Optional, List, Dict, Any
@@ -37,7 +30,7 @@ except ImportError:
 from safetensors.torch import load_file
 import os
 
-from alpha_gated_layer import AlphaGatedLayer
+from .alpha_gated_layer import AlphaGatedLayer
 
 
 class ProgressiveLlamaModelAlpha(nn.Module):
@@ -107,7 +100,7 @@ class ProgressiveLlamaModelAlpha(nn.Module):
         num_layers = self.config.num_hidden_layers
         
         for layer_idx in range(num_layers):
-            # 레이어 생성 (항상!)
+            # 레이어 생성 
             try:
                 # 최신 vLLM 또는 v1
                 base_layer = LlamaDecoderLayer(
@@ -200,7 +193,7 @@ class ProgressiveLlamaModelAlpha(nn.Module):
         checkpoint_path: str,
     ) -> None:
         """
-        레이어 활성화 (alpha: 0 → 1) - ✅ CUDA Graph 호환
+        레이어 활성화 (alpha: 0 → 1) -  CUDA Graph 호환
         
         핵심 변경:
         1. load_state_dict() → .copy_() 사용
@@ -222,22 +215,22 @@ class ProgressiveLlamaModelAlpha(nn.Module):
         device = next(self.parameters()).device
         
         for layer_idx in layer_indices:
-            print(f"\n📂 Activating layer {layer_idx}...")
+            print(f"\n Activating layer {layer_idx}...")
             
             gated_layer = self.layers[layer_idx]
             
             # AlphaGatedLayer 확인
             if not hasattr(gated_layer, 'is_alpha_gated'):
-                print(f"  ⚠️  Layer {layer_idx} is not AlphaGatedLayer!")
+                print(f" Layer {layer_idx} is not AlphaGatedLayer!")
                 continue
             
             # 이미 활성화된 레이어
             if gated_layer.is_active():
-                print(f"  ℹ️  Layer {layer_idx} is already active")
+                print(f" Layer {layer_idx} is already active")
                 continue
             
             # 1. Weight 추출
-            print(f"  🔥 Loading weights...")
+            print(f"Loading weights...")
             layer_prefix = f"model.layers.{layer_idx}."
             layer_weights = {
                 k.replace(layer_prefix, ""): v
@@ -246,10 +239,10 @@ class ProgressiveLlamaModelAlpha(nn.Module):
             }
             
             if not layer_weights:
-                print(f"  ⚠️  No weights found for layer {layer_idx}")
+                print(f" No weights found for layer {layer_idx}")
                 continue
             
-            # 2. ✅ .copy_()로 in-place weight 로드 (CUDA Graph 호환!)
+            # 2. .copy_()로 in-place weight 로드 (CUDA Graph 호환)
             loaded_count = 0
             
             for name, param in gated_layer.layer.named_parameters():
@@ -266,10 +259,10 @@ class ProgressiveLlamaModelAlpha(nn.Module):
                             layer_weights["self_attn.v_proj.weight"]
                         ], dim=0)
                         
-                        # ✅ 핵심: .copy_() 사용! (메모리 주소 유지)
+                        # .copy_() 사용(메모리 주소 유지)
                         param.data.copy_(qkv_weight.to(device))
                         loaded_count += 1
-                        print(f"  ✅ Loaded fused QKV")
+                        print(f" Loaded fused QKV")
                         continue
                 
                 # 2.2. Gate-Up fusion 처리
@@ -283,15 +276,15 @@ class ProgressiveLlamaModelAlpha(nn.Module):
                             layer_weights["mlp.up_proj.weight"]
                         ], dim=0)
                         
-                        # ✅ 핵심: .copy_() 사용! (메모리 주소 유지)
+                        # .copy_() 사용 (메모리 주소 유지)
                         param.data.copy_(gate_up_weight.to(device))
                         loaded_count += 1
-                        print(f"  ✅ Loaded fused Gate-Up")
+                        print(f" Loaded fused Gate-Up")
                         continue
                 
                 # 2.3. 일반 weights 처리
                 if name in layer_weights:
-                    # ✅ 핵심: .copy_() 사용! (메모리 주소 유지)
+                    # .copy_() 사용 (메모리 주소 유지)
                     param.data.copy_(layer_weights[name].to(device))
                     loaded_count += 1
             
@@ -303,12 +296,11 @@ class ProgressiveLlamaModelAlpha(nn.Module):
             # 4. initially_inactive에서 제거
             self.initially_inactive.discard(layer_idx)
             
-            print(f"  ✅ Layer {layer_idx} activated!")
+            print(f" Layer {layer_idx} activated!")
         
         print(f"\n{'='*60}")
         print(f"LAYER ACTIVATION COMPLETE")
         print(f"Inactive layers: {self.count_inactive_layers()}")
-        print(f"✅ CUDA Graph 유지됨 (재캡처 불필요)")
         print(f"{'='*60}\n")
     
     # ============================================================
@@ -357,7 +349,7 @@ class ProgressiveLlamaModelAlpha(nn.Module):
                 info = status[i]
                 active = info['active']
                 alpha = info['alpha']
-                symbol = "◉" if active else "⊗"
+                symbol = "o" if active else "x"
                 print(f"  L{i:2d}: {symbol} alpha={alpha:.1f} ({'ACTIVE' if active else 'INACTIVE'})")
         
         # Summary
@@ -374,7 +366,7 @@ class ProgressiveLlamaModelAlpha(nn.Module):
         print(f"Inactive Layers:      {inactive}")
         print(f"Activation Progress:  {progress:.1f}%")
         print(f"Current Adapter:      {self.current_adapter or 'None'}")
-        print(f"✅ CUDA Graph:        Compatible (no recapture needed)")
+        print(f" CUDA Graph:        Compatible (no recapture needed)")
         print(f"{'='*60}\n")
     
     def verify_recovery(self) -> Dict:

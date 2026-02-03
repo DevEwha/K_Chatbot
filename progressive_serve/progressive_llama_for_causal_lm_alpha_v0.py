@@ -21,7 +21,7 @@ except ImportError:
     default_weight_loader = None
 
 # cuda graph 수정을 위한 주석
-from progressive_llama_alpha_fixed2 import ProgressiveLlamaModelAlpha
+from progressive_llama_alpha_fixed import ProgressiveLlamaModelAlpha
 
 
 class ProgressiveLlamaForCausalLMAlpha(nn.Module):
