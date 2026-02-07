@@ -5,7 +5,7 @@ import time
 # gpu_memory_utilization: GPU 메모리를 얼마나 쓸지 설정 (기본값 0.9)
 llm = LLM(
     model="meta-llama/Llama-2-7b-chat-hf", 
-    gpu_memory_utilization=0.9,
+    gpu_memory_utilization=0.5,
     enable_prefix_caching=True
 )
 
