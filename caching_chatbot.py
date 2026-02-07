@@ -3,10 +3,12 @@ import time
 
 # 1. vLLM 엔진 초기화 (여기서 모델을 로드하고 GPU 메모리를 예약합니다)
 # gpu_memory_utilization: GPU 메모리를 얼마나 쓸지 설정 (기본값 0.9)
+# prefix_cache_num_layers: 처음 N개 레이어만 prefix caching 사용 (나머지는 매번 재계산)
 llm = LLM(
-    model="meta-llama/Llama-2-7b-chat-hf", 
+    model="meta-llama/Llama-2-7b-chat-hf",
     gpu_memory_utilization=0.5,
-    enable_prefix_caching=True
+    enable_prefix_caching=True,
+    prefix_cache_num_layers=15  # 레이어 0-14만 prefix caching, 15-31은 매번 재계산
 )
 
 # 2. 텍스트 생성 옵션 설정 (온도, 최대 길이 등)
